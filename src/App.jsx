@@ -30,6 +30,8 @@ const CATALOG_KEY = "afd_catalog_v1";
 const ORDERS_KEY = "afd_orders_v1";
 const TRANSPORT_KEY = "afd_transport_v1";
 const COURSE_KEY = "afd_course_v1";
+const TRANSPORT_PRICE_KEY = "afd_transport_price_v1";
+const DEFAULT_TRANSPORT_PRICE = 20;
 
 function fontImport() {
   return (
@@ -52,6 +54,7 @@ export default function App() {
   const [orders, setOrders] = useState([]);
   const [transportRequests, setTransportRequests] = useState([]);
   const [courseRequests, setCourseRequests] = useState([]);
+  const [transportPrice, setTransportPrice] = useState(DEFAULT_TRANSPORT_PRICE);
 
   // view: home | food-home | zone | cart | confirm | transport | course | request-confirm | admin-login | admin
   const [view, setView] = useState("home");
@@ -79,6 +82,10 @@ export default function App() {
         const cr = await getVal(COURSE_KEY);
         if (cr) setCourseRequests(JSON.parse(cr));
       } catch (e) { console.error("Erreur de chargement des courses", e); }
+      try {
+        const tp = await getVal(TRANSPORT_PRICE_KEY);
+        if (tp) setTransportPrice(JSON.parse(tp));
+      } catch (e) { console.error("Erreur de chargement du prix transport", e); }
       setLoading(false);
     })();
   }, []);
@@ -103,6 +110,11 @@ export default function App() {
   const persistCourse = useCallback(async (next) => {
     setCourseRequests(next);
     try { await setVal(COURSE_KEY, JSON.stringify(next)); } catch (e) { console.error(e); }
+  }, []);
+
+  const persistTransportPrice = useCallback(async (next) => {
+    setTransportPrice(next);
+    try { await setVal(TRANSPORT_PRICE_KEY, JSON.stringify(next)); } catch (e) { console.error(e); }
   }, []);
 
   if (loading) {
@@ -182,6 +194,7 @@ export default function App() {
 
       {view === "transport" && (
         <TransportScreen
+          price={transportPrice}
           onBack={() => setView("home")}
           onSubmit={async (data) => {
             const req = { id: "TR-" + Date.now().toString().slice(-6), ...data, status: "nouvelle", createdAt: new Date().toISOString() };
@@ -221,6 +234,7 @@ export default function App() {
           orders={orders} persistOrders={persistOrders}
           transportRequests={transportRequests} persistTransport={persistTransport}
           courseRequests={courseRequests} persistCourse={persistCourse}
+          transportPrice={transportPrice} persistTransportPrice={persistTransportPrice}
           saving={saving}
           onExit={() => { setAdminAuthed(false); setView("home"); }}
         />
@@ -472,7 +486,7 @@ function CartScreen({ catalog, cart, setCart, onBack, onConfirm }) {
 }
 
 // ================= TRANSPORT =================
-function TransportScreen({ onBack, onSubmit }) {
+function TransportScreen({ onBack, onSubmit, price }) {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [when, setWhen] = useState("");
@@ -501,9 +515,13 @@ function TransportScreen({ onBack, onSubmit }) {
         <Field label="Note (optionnel)" value={notes} onChange={setNotes} placeholder="Nombre de personnes, bagages..." textarea />
       </div>
 
-      <div style={{ background: PAPER, border: `1.5px solid ${LINE}`, borderRadius: 14, padding: 13, margin: "16px 0", fontSize: 12.5, color: MUTE, display: "flex", gap: 8 }}>
+      <div style={{ background: `${GREEN}14`, border: `1.5px solid ${GREEN}`, borderRadius: 14, padding: 13, margin: "16px 0 10px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ fontSize: 12.5, fontWeight: 700, color: NAVY }}>Prix indicatif du trajet</span>
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 800, fontSize: 17, color: GREEN }}>¥{price}</span>
+      </div>
+      <div style={{ background: PAPER, border: `1.5px solid ${LINE}`, borderRadius: 14, padding: 13, marginBottom: 16, fontSize: 12.5, color: MUTE, display: "flex", gap: 8 }}>
         <Phone size={15} color={GREEN} style={{ flexShrink: 0, marginTop: 1 }} />
-        Après ta demande, notre équipe t'appelle pour confirmer le prix de la course et l'heure exacte.
+        Après ta demande, notre équipe t'appelle pour confirmer le prix et l'heure exacte (le prix peut varier selon la distance).
       </div>
 
       <button onClick={() => canSend && onSubmit({ from, to, when, name, phone, notes })} disabled={!canSend} style={{ width: "100%", background: GREEN, color: "#fff", border: "none", borderRadius: 16, padding: 15, fontWeight: 800, fontSize: 14.5, opacity: canSend ? 1 : 0.5 }}>
@@ -595,13 +613,12 @@ function AdminLogin({ onSuccess, onBack }) {
       {error && <div style={{ color: RUST, fontSize: 12, marginBottom: 12 }}>Code incorrect, réessaie.</div>}
       <button onClick={() => (pin === ADMIN_PIN ? onSuccess() : setError(true))} style={{ width: "100%", background: NAVY, color: CREAM, border: "none", borderRadius: 12, padding: 13, fontWeight: 700, fontSize: 13.5, marginBottom: 10 }}>Entrer</button>
       <button onClick={onBack} style={{ background: "none", border: "none", color: MUTE, fontSize: 12.5 }}>Annuler</button>
-      <p style={{ fontSize: 11, color: MUTE, marginTop: 24 }}>Code de démo : {ADMIN_PIN} — à remplacer par une vraie authentification avant mise en ligne publique.</p>
     </div>
   );
 }
 
 // ================= ADMIN PANEL =================
-function AdminPanel({ catalog, persistCatalog, orders, persistOrders, transportRequests, persistTransport, courseRequests, persistCourse, saving, onExit }) {
+function AdminPanel({ catalog, persistCatalog, orders, persistOrders, transportRequests, persistTransport, courseRequests, persistCourse, transportPrice, persistTransportPrice, saving, onExit }) {
   const [tab, setTab] = useState("plats"); // plats | commandes | transports | courses
   const [editingDish, setEditingDish] = useState(null);
   const [zoneFilter, setZoneFilter] = useState("all");
@@ -707,6 +724,23 @@ function AdminPanel({ catalog, persistCatalog, orders, persistOrders, transportR
 
       {tab === "transports" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ border: `1.5px solid ${LINE}`, borderRadius: 14, padding: 14, background: PAPER, display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 14, color: NAVY }}>Prix indicatif du transport</div>
+              <div style={{ fontSize: 12, color: MUTE }}>Affiché aux clients avant leur demande</div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <button
+                onClick={() => persistTransportPrice(Math.max(0, transportPrice - 5))}
+                style={{ width: 34, height: 34, borderRadius: 999, border: `1.5px solid ${LINE}`, background: "#fff", fontSize: 18, fontWeight: 800, color: NAVY, cursor: "pointer" }}
+              >−</button>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 800, fontSize: 18, color: GREEN, minWidth: 52, textAlign: "center" }}>¥{transportPrice}</span>
+              <button
+                onClick={() => persistTransportPrice(transportPrice + 5)}
+                style={{ width: 34, height: 34, borderRadius: 999, border: `1.5px solid ${LINE}`, background: "#fff", fontSize: 18, fontWeight: 800, color: NAVY, cursor: "pointer" }}
+              >+</button>
+            </div>
+          </div>
           {transportRequests.length === 0 && <EmptyState text="Aucune demande de transport pour le moment." />}
           {transportRequests.map((r) => (
             <div key={r.id} style={{ border: `1.5px solid ${LINE}`, borderRadius: 14, padding: 14, background: PAPER }}>
