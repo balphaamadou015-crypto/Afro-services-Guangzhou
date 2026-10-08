@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import {
   ShoppingBag, Plus, Minus, MapPin, Lock, Settings, ChevronLeft, Search,
   CheckCircle2, XCircle, Trash2, Edit3, X, Save, ClipboardList, Loader2, Globe2,
-  Bike, Package, UtensilsCrossed, ArrowRight, Phone
+  Bike, Package, UtensilsCrossed, ArrowRight, Phone, QrCode, Upload, Banknote
 } from "lucide-react";
 import { getVal, setVal } from "./storage";
 
@@ -32,6 +32,8 @@ const TRANSPORT_KEY = "afd_transport_v1";
 const COURSE_KEY = "afd_course_v1";
 const TRANSPORT_PRICE_KEY = "afd_transport_price_v1";
 const DEFAULT_TRANSPORT_PRICE = 20;
+const PAYMENT_KEY = "afd_payment_v1";
+const DEFAULT_PAYMENT_INFO = { wechatQR: null, alipayQR: null, note: "" };
 
 function fontImport() {
   return (
@@ -55,6 +57,8 @@ export default function App() {
   const [transportRequests, setTransportRequests] = useState([]);
   const [courseRequests, setCourseRequests] = useState([]);
   const [transportPrice, setTransportPrice] = useState(DEFAULT_TRANSPORT_PRICE);
+  const [paymentInfo, setPaymentInfo] = useState(DEFAULT_PAYMENT_INFO);
+  const [pending, setPending] = useState(null); // { kind: "order"|"transport"|"course", data }
 
   // view: home | food-home | zone | cart | confirm | transport | course | request-confirm | admin-login | admin
   const [view, setView] = useState("home");
@@ -86,6 +90,10 @@ export default function App() {
         const tp = await getVal(TRANSPORT_PRICE_KEY);
         if (tp) setTransportPrice(JSON.parse(tp));
       } catch (e) { console.error("Erreur de chargement du prix transport", e); }
+      try {
+        const pay = await getVal(PAYMENT_KEY);
+        if (pay) setPaymentInfo({ ...DEFAULT_PAYMENT_INFO, ...JSON.parse(pay) });
+      } catch (e) { console.error("Erreur de chargement des infos de paiement", e); }
       setLoading(false);
     })();
   }, []);
@@ -116,6 +124,44 @@ export default function App() {
     setTransportPrice(next);
     try { await setVal(TRANSPORT_PRICE_KEY, JSON.stringify(next)); } catch (e) { console.error(e); }
   }, []);
+
+  const persistPaymentInfo = useCallback(async (next) => {
+    setPaymentInfo(next);
+    try { await setVal(PAYMENT_KEY, JSON.stringify(next)); } catch (e) { console.error(e); }
+  }, []);
+
+  const hasPaymentQR = !!(paymentInfo.wechatQR || paymentInfo.alipayQR);
+
+  // Enregistre définitivement une commande/demande en attente, avec sa méthode de paiement.
+  const finishPending = async (paymentMethod, override) => {
+    const p = override || pending;
+    if (!p) return;
+    const record = { ...p.data, paymentMethod, paymentConfirmed: paymentMethod === "qr" };
+    if (p.kind === "order") {
+      await persistOrders([record, ...orders]);
+      setView("confirm");
+    } else if (p.kind === "transport") {
+      await persistTransport([record, ...transportRequests]);
+      setLastRequestType("transport");
+      setView("request-confirm");
+    } else if (p.kind === "course") {
+      await persistCourse([record, ...courseRequests]);
+      setLastRequestType("course");
+      setView("request-confirm");
+    }
+    setPending(null);
+  };
+
+  // Après un panier/une demande : passe par l'écran de paiement si Alpha a configuré un QR,
+  // sinon enregistre directement comme avant (aucun blocage si le paiement n'est pas encore configuré).
+  const goToPaymentOrFinish = (kind, data, amount) => {
+    if (hasPaymentQR) {
+      setPending({ kind, data, amount });
+      setView("payment");
+    } else {
+      finishPending("cash", { kind, data, amount });
+    }
+  };
 
   if (loading) {
     return (
@@ -183,9 +229,8 @@ export default function App() {
               id: "CMD-" + Date.now().toString().slice(-6),
               customer, items, total, status: "nouvelle", createdAt: new Date().toISOString(),
             };
-            await persistOrders([order, ...orders]);
             setCart({});
-            setView("confirm");
+            goToPaymentOrFinish("order", order, total);
           }}
         />
       )}
@@ -198,9 +243,7 @@ export default function App() {
           onBack={() => setView("home")}
           onSubmit={async (data) => {
             const req = { id: "TR-" + Date.now().toString().slice(-6), ...data, status: "nouvelle", createdAt: new Date().toISOString() };
-            await persistTransport([req, ...transportRequests]);
-            setLastRequestType("transport");
-            setView("request-confirm");
+            goToPaymentOrFinish("transport", req, transportPrice);
           }}
         />
       )}
@@ -210,10 +253,17 @@ export default function App() {
           onBack={() => setView("home")}
           onSubmit={async (data) => {
             const req = { id: "CO-" + Date.now().toString().slice(-6), ...data, status: "nouvelle", createdAt: new Date().toISOString() };
-            await persistCourse([req, ...courseRequests]);
-            setLastRequestType("course");
-            setView("request-confirm");
+            goToPaymentOrFinish("course", req, null);
           }}
+        />
+      )}
+
+      {view === "payment" && pending && (
+        <PaymentScreen
+          pending={pending}
+          paymentInfo={paymentInfo}
+          onBack={() => setView("home")}
+          onDone={async (paymentMethod) => finishPending(paymentMethod)}
         />
       )}
 
@@ -235,6 +285,7 @@ export default function App() {
           transportRequests={transportRequests} persistTransport={persistTransport}
           courseRequests={courseRequests} persistCourse={persistCourse}
           transportPrice={transportPrice} persistTransportPrice={persistTransportPrice}
+          paymentInfo={paymentInfo} persistPaymentInfo={persistPaymentInfo}
           saving={saving}
           onExit={() => { setAdminAuthed(false); setView("home"); }}
         />
@@ -581,6 +632,22 @@ function Field({ label, value, onChange, placeholder, textarea }) {
   );
 }
 
+function PaymentBadge({ record }) {
+  if (!record.paymentMethod) return null; // commandes créées avant la fonctionnalité de paiement
+  const isQR = record.paymentMethod === "qr";
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 9px", borderRadius: 999,
+      fontSize: 10.5, fontWeight: 700,
+      background: isQR ? `${GREEN}18` : `${GOLD}18`,
+      color: isQR ? GREEN : "#8A6A1E",
+    }}>
+      {isQR ? <QrCode size={11} /> : <Banknote size={11} />}
+      {isQR ? "Paiement signalé (à vérifier)" : "Paiement à la livraison"}
+    </span>
+  );
+}
+
 function Row({ label, value, bold }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", fontSize: bold ? 15 : 13, fontWeight: bold ? 800 : 500, color: NAVY, padding: "3px 0", fontFamily: bold ? "'JetBrains Mono', monospace" : "inherit" }}>
@@ -596,6 +663,70 @@ function ConfirmScreen({ onHome, text }) {
       <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 700, color: NAVY, margin: "0 0 8px" }}>Demande envoyée !</h2>
       <p style={{ color: MUTE, fontSize: 14, marginBottom: 24 }}>{text}</p>
       <button onClick={onHome} style={{ background: NAVY, color: CREAM, border: "none", borderRadius: 14, padding: "13px 24px", fontWeight: 700, fontSize: 13.5 }}>Retour à l'accueil</button>
+    </div>
+  );
+}
+
+// ================= PAIEMENT =================
+function PaymentScreen({ pending, paymentInfo, onBack, onDone }) {
+  const [busy, setBusy] = useState(false);
+  const label = pending.kind === "order" ? "ta commande" : pending.kind === "transport" ? "ton transport" : "ta course/commission";
+  const qrs = [
+    paymentInfo.wechatQR && { label: "WeChat Pay", img: paymentInfo.wechatQR },
+    paymentInfo.alipayQR && { label: "Alipay", img: paymentInfo.alipayQR },
+  ].filter(Boolean);
+
+  const confirm = async (method) => {
+    setBusy(true);
+    await onDone(method);
+    setBusy(false);
+  };
+
+  return (
+    <div style={{ maxWidth: 480, margin: "0 auto", padding: "20px 20px 60px" }}>
+      <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", color: MUTE, fontSize: 13, marginBottom: 14, padding: 0 }}>
+        <ChevronLeft size={16} /> Retour
+      </button>
+      <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: 22, fontWeight: 700, color: NAVY, margin: "0 0 4px" }}>Paiement</h2>
+      <p style={{ color: MUTE, fontSize: 13, marginBottom: 18 }}>Pour {label}, règle directement par QR code, ou choisis de payer à la livraison.</p>
+
+      {pending.amount != null ? (
+        <div style={{ background: `${GREEN}14`, border: `1.5px solid ${GREEN}`, borderRadius: 14, padding: 14, marginBottom: 18, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: NAVY }}>Montant à payer</span>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 800, fontSize: 19, color: GREEN }}>¥{pending.amount}</span>
+        </div>
+      ) : (
+        <div style={{ background: PAPER, border: `1.5px solid ${LINE}`, borderRadius: 14, padding: 14, marginBottom: 18, fontSize: 12.5, color: MUTE }}>
+          Le montant sera confirmé avec toi par notre équipe avant le paiement.
+        </div>
+      )}
+
+      {qrs.length > 0 ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14, marginBottom: 20 }}>
+          {qrs.map((q) => (
+            <div key={q.label} style={{ border: `1.5px solid ${LINE}`, borderRadius: 16, padding: 16, background: "#fff", textAlign: "center" }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: NAVY, marginBottom: 10 }}>{q.label}</div>
+              <img src={q.img} alt={q.label} style={{ width: "100%", maxWidth: 220, borderRadius: 10, margin: "0 auto", display: "block" }} />
+            </div>
+          ))}
+          {paymentInfo.note && <p style={{ fontSize: 12, color: MUTE, textAlign: "center" }}>{paymentInfo.note}</p>}
+        </div>
+      ) : (
+        <div style={{ background: PAPER, border: `1.5px solid ${LINE}`, borderRadius: 14, padding: 14, marginBottom: 20, fontSize: 12.5, color: MUTE, textAlign: "center" }}>
+          Aucun QR de paiement disponible pour le moment.
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {qrs.length > 0 && (
+          <button disabled={busy} onClick={() => confirm("qr")} style={{ width: "100%", background: GREEN, color: "#fff", border: "none", borderRadius: 16, padding: 15, fontWeight: 800, fontSize: 14.5, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, opacity: busy ? 0.6 : 1 }}>
+            {busy ? <Loader2 size={17} style={{ animation: "spin 1s linear infinite" }} /> : <CheckCircle2 size={17} />} J'ai payé
+          </button>
+        )}
+        <button disabled={busy} onClick={() => confirm("cash")} style={{ width: "100%", background: "#fff", color: NAVY, border: `1.5px solid ${LINE}`, borderRadius: 16, padding: 15, fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, opacity: busy ? 0.6 : 1 }}>
+          <Banknote size={17} /> Je paierai à la livraison
+        </button>
+      </div>
     </div>
   );
 }
@@ -617,9 +748,35 @@ function AdminLogin({ onSuccess, onBack }) {
   );
 }
 
+// Redimensionne et compresse une image uploadée (QR code) avant de la stocker en base64.
+function fileToCompressedDataUrl(file, maxSize = 500, quality = 0.82) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Lecture du fichier impossible"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Image invalide"));
+      img.onload = () => {
+        const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 // ================= ADMIN PANEL =================
-function AdminPanel({ catalog, persistCatalog, orders, persistOrders, transportRequests, persistTransport, courseRequests, persistCourse, transportPrice, persistTransportPrice, saving, onExit }) {
-  const [tab, setTab] = useState("plats"); // plats | commandes | transports | courses
+function AdminPanel({ catalog, persistCatalog, orders, persistOrders, transportRequests, persistTransport, courseRequests, persistCourse, transportPrice, persistTransportPrice, paymentInfo, persistPaymentInfo, saving, onExit }) {
+  const [tab, setTab] = useState("plats"); // plats | commandes | transports | courses | paiement
   const [editingDish, setEditingDish] = useState(null);
   const [zoneFilter, setZoneFilter] = useState("all");
 
@@ -643,6 +800,7 @@ function AdminPanel({ catalog, persistCatalog, orders, persistOrders, transportR
     ["commandes", `Commandes repas (${orders.filter(o => o.status !== "livree").length})`],
     ["transports", `Transports (${transportRequests.filter(r => r.status !== "terminee").length})`],
     ["courses", `Courses (${courseRequests.filter(r => r.status !== "terminee").length})`],
+    ["paiement", "Paiement"],
   ];
 
   return (
@@ -709,7 +867,8 @@ function AdminPanel({ catalog, persistCatalog, orders, persistOrders, transportR
                 <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 15, color: NAVY }}>¥{o.total + 6}</span>
               </div>
               <div style={{ fontSize: 12.5, color: MUTE, marginBottom: 4 }}>📞 {o.customer?.phone} · 📍 {o.customer?.address}</div>
-              <div style={{ fontSize: 12.5, color: INK, marginBottom: 10 }}>{o.items.map((i) => `${i.qty}× ${i.name}`).join(", ")}</div>
+              <div style={{ fontSize: 12.5, color: INK, marginBottom: 8 }}>{o.items.map((i) => `${i.qty}× ${i.name}`).join(", ")}</div>
+              <div style={{ marginBottom: 10 }}><PaymentBadge record={o} /></div>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 {["nouvelle", "en_cuisine", "en_route", "livree"].map((s) => (
                   <button key={s} onClick={() => setOrderStatus(o.id, s)} style={{ padding: "6px 11px", borderRadius: 999, fontSize: 11, fontWeight: 700, background: o.status === s ? NAVY : "#FFFFFF", color: o.status === s ? CREAM : MUTE, border: `1.5px solid ${o.status === s ? NAVY : LINE}` }}>
@@ -753,6 +912,7 @@ function AdminPanel({ catalog, persistCatalog, orders, persistOrders, transportR
               </div>
               <div style={{ fontSize: 12.5, color: MUTE, marginBottom: 4 }}>🕐 {r.when || "Non précisé"} · 📞 {r.phone}</div>
               {r.notes && <div style={{ fontSize: 12.5, color: MUTE, marginBottom: 8, fontStyle: "italic" }}>« {r.notes} »</div>}
+              <div style={{ marginBottom: 4 }}><PaymentBadge record={r} /></div>
               <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
                 {["nouvelle", "en_cours", "terminee"].map((s) => (
                   <button key={s} onClick={() => setTransportStatus(r.id, s)} style={{ padding: "6px 11px", borderRadius: 999, fontSize: 11, fontWeight: 700, background: r.status === s ? GREEN : "#FFFFFF", color: r.status === s ? "#fff" : MUTE, border: `1.5px solid ${r.status === s ? GREEN : LINE}` }}>
@@ -776,6 +936,7 @@ function AdminPanel({ catalog, persistCatalog, orders, persistOrders, transportR
               <div style={{ fontSize: 12.5, color: MUTE, marginBottom: 8 }}>
                 📍 Récupération : {r.pickup}{r.dropoff ? ` → Livraison : ${r.dropoff}` : ""} · 📞 {r.phone}
               </div>
+              <div style={{ marginBottom: 8 }}><PaymentBadge record={r} /></div>
               <div style={{ display: "flex", gap: 6 }}>
                 {["nouvelle", "en_cours", "terminee"].map((s) => (
                   <button key={s} onClick={() => setCourseStatus(r.id, s)} style={{ padding: "6px 11px", borderRadius: 999, fontSize: 11, fontWeight: 700, background: r.status === s ? GOLD : "#FFFFFF", color: r.status === s ? "#fff" : MUTE, border: `1.5px solid ${r.status === s ? GOLD : LINE}` }}>
@@ -788,9 +949,83 @@ function AdminPanel({ catalog, persistCatalog, orders, persistOrders, transportR
         </div>
       )}
 
+      {tab === "paiement" && (
+        <PaymentSettings paymentInfo={paymentInfo} persistPaymentInfo={persistPaymentInfo} />
+      )}
+
       {editingDish && (
         <DishEditor zones={catalog.zones} dish={editingDish === "new" ? null : editingDish} defaultZoneId={zoneFilter !== "all" ? zoneFilter : catalog.zones[0]?.id} onCancel={() => setEditingDish(null)} onSave={saveDish} />
       )}
+    </div>
+  );
+}
+
+function PaymentSettings({ paymentInfo, persistPaymentInfo }) {
+  const [uploading, setUploading] = useState(null); // "wechatQR" | "alipayQR" | null
+  const [note, setNote] = useState(paymentInfo.note || "");
+  const [error, setError] = useState("");
+
+  const handleUpload = async (field, file) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { setError("Merci de choisir une image (photo ou capture d'écran)."); return; }
+    setError("");
+    setUploading(field);
+    try {
+      const dataUrl = await fileToCompressedDataUrl(file);
+      await persistPaymentInfo({ ...paymentInfo, [field]: dataUrl });
+    } catch (e) {
+      console.error(e);
+      setError("Impossible de charger cette image, réessaie avec une autre photo.");
+    }
+    setUploading(null);
+  };
+
+  const removeQR = (field) => persistPaymentInfo({ ...paymentInfo, [field]: null });
+  const saveNote = () => persistPaymentInfo({ ...paymentInfo, note });
+
+  const QRBlock = ({ field, label, color }) => (
+    <div style={{ border: `1.5px solid ${LINE}`, borderRadius: 16, padding: 16, background: PAPER }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+        <QrCode size={16} color={color} />
+        <span style={{ fontWeight: 700, fontSize: 14, color: NAVY }}>{label}</span>
+      </div>
+      {paymentInfo[field] ? (
+        <div style={{ textAlign: "center" }}>
+          <img src={paymentInfo[field]} alt={label} style={{ width: 160, height: 160, objectFit: "contain", borderRadius: 10, border: `1.5px solid ${LINE}`, background: "#fff", marginBottom: 10 }} />
+          <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+            <label style={{ cursor: "pointer", fontSize: 12, fontWeight: 700, color: NAVY, border: `1.5px solid ${LINE}`, borderRadius: 999, padding: "6px 12px", background: "#fff" }}>
+              Remplacer
+              <input type="file" accept="image/*" onChange={(e) => handleUpload(field, e.target.files[0])} style={{ display: "none" }} />
+            </label>
+            <button onClick={() => removeQR(field)} style={{ fontSize: 12, fontWeight: 700, color: RUST, border: `1.5px solid ${RUST}44`, borderRadius: 999, padding: "6px 12px", background: "#fff" }}>Retirer</button>
+          </div>
+        </div>
+      ) : (
+        <label style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, cursor: "pointer", border: `1.5px dashed ${LINE}`, borderRadius: 12, padding: "24px 12px", background: "#fff" }}>
+          {uploading === field ? <Loader2 size={22} color={MUTE} style={{ animation: "spin 1s linear infinite" }} /> : <Upload size={22} color={MUTE} />}
+          <span style={{ fontSize: 12.5, color: MUTE, textAlign: "center" }}>
+            {uploading === field ? "Chargement…" : "Uploader la photo de ton QR code"}
+          </span>
+          <input type="file" accept="image/*" onChange={(e) => handleUpload(field, e.target.files[0])} style={{ display: "none" }} />
+        </label>
+      )}
+    </div>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ fontSize: 12.5, color: MUTE, background: `${GREEN}10`, border: `1.5px solid ${GREEN}33`, borderRadius: 12, padding: 12 }}>
+        Uploade ici tes QR codes personnels WeChat Pay et/ou Alipay (ceux que tu utilises déjà pour recevoir de l'argent). Ils s'afficheront aux clients au moment de payer. Tu vérifies et valides chaque paiement toi-même.
+      </div>
+      {error && <div style={{ fontSize: 12.5, color: RUST }}>{error}</div>}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 14 }}>
+        <QRBlock field="wechatQR" label="WeChat Pay" color={GREEN} />
+        <QRBlock field="alipayQR" label="Alipay" color={TEAL} />
+      </div>
+      <div>
+        <Field label="Message affiché aux clients (facultatif)" value={note} onChange={setNote} placeholder="Ex : indique ton nom en commentaire du paiement" textarea />
+        <button onClick={saveNote} style={{ marginTop: 8, background: NAVY, color: CREAM, border: "none", borderRadius: 12, padding: "9px 16px", fontWeight: 700, fontSize: 12.5 }}>Enregistrer le message</button>
+      </div>
     </div>
   );
 }
